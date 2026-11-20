@@ -1,0 +1,189 @@
+// Carteira Local — schema Prisma (SQLite)
+// Convenções:
+//  - Valores monetários em Float (BRL). Arredondar apenas na apresentação.
+//  - Datas de negócio (pregão, pagamento) em DateTime UTC à meia-noite.
+//  - Campos "string-enum" são validados com Zod (ver src/lib/finance/constants.ts).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// ATIVOS
+// ---------------------------------------------------------------------------
+
+model Asset {
+  id         String   @id @default(cuid())
+  ticker     String   @unique // PETR4, HGLG11, "TESOURO IPCA+ 2035", "CDB BANCO X 2027"
+  name       String?
+  assetClass String // ACAO | FII | ETF | BDR | RENDA_FIXA | TESOURO | FUNDO | CRIPTO | OUTRO
+  sector     String?
+  cnpj       String? // útil p/ FIIs e fundos; ajuda a conciliar com a B3
+  currency   String   @default("BRL")
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  fixedIncome  FixedIncomeTerms?
+  transactions Transaction[]
+  proventos    Provento[]
+  quotes       PriceQuote[]
+  positions    PositionSnapshot[]
+
+  @@index([assetClass])
+}
+
+// Condições contratadas da renda fixa (1:1 com Asset RENDA_FIXA / TESOURO)
+model FixedIncomeTerms {
+  id           String    @id @default(cuid())
+  assetId      String    @unique
+  asset        Asset     @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  indexer      String // CDI_PERCENT | CDI_SPREAD | IPCA_SPREAD | PREFIXADO | SELIC
+  rate         Float // CDI_PERCENT: 110 (=110% do CDI) | IPCA_SPREAD / PREFIXADO / CDI_SPREAD: % a.a.
+  issueDate    DateTime?
+  maturityDate DateTime
+  issuer       String? // banco/emissor ou "Tesouro Nacional"
+  isTaxExempt  Boolean   @default(false) // LCI/LCA/CRI/CRA/debêntures incentivadas
+  notes        String?
+}
+
+// ---------------------------------------------------------------------------
+// MOVIMENTAÇÕES
+// ---------------------------------------------------------------------------
+
+model Transaction {
+  id            String       @id @default(cuid())
+  assetId       String
+  asset         Asset        @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  type          String // BUY | SELL | SPLIT | REVERSE_SPLIT | BONUS | MATURITY | AMORTIZATION
+  tradeDate     DateTime
+  quantity      Float // em SPLIT/BONUS: quantidade adicional (ou use `factor`)
+  unitPrice     Float // BRL; 0 em eventos corporativos sem custo
+  fees          Float        @default(0) // corretagem + emolumentos
+  taxes         Float        @default(0) // IR retido na fonte etc.
+  factor        Float? // desdobramento 2:1 => 2 ; grupamento 10:1 => 0.1
+  source        String       @default("MANUAL") // MANUAL | B3_MOVIMENTACAO | B3_NEGOCIACAO
+  externalId    String? // hash determinístico da linha importada (deduplicação)
+  importBatchId String?
+  importBatch   ImportBatch? @relation(fields: [importBatchId], references: [id], onDelete: SetNull)
+  notes         String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@unique([source, externalId])
+  @@index([assetId, tradeDate])
+  @@index([tradeDate])
+}
+
+model Provento {
+  id            String       @id @default(cuid())
+  assetId       String
+  asset         Asset        @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  type          String // DIVIDENDO | JCP | RENDIMENTO | AMORTIZACAO | OUTRO
+  comDate       DateTime? // data com
+  paymentDate   DateTime
+  quantity      Float? // quantidade na data com
+  grossAmount   Float // valor bruto total
+  taxWithheld   Float        @default(0) // ex.: 15% de IR sobre JCP
+  netAmount     Float // valor líquido recebido
+  source        String       @default("MANUAL")
+  externalId    String?
+  importBatchId String?
+  importBatch   ImportBatch? @relation(fields: [importBatchId], references: [id], onDelete: SetNull)
+  createdAt     DateTime     @default(now())
+
+  @@unique([source, externalId])
+  @@index([assetId, paymentDate])
+  @@index([paymentDate])
+}
+
+// Lote de importação: auditoria + possibilidade de desfazer um upload inteiro
+model ImportBatch {
+  id           String        @id @default(cuid())
+  fileName     String
+  fileKind     String // B3_POSICAO | B3_MOVIMENTACAO | B3_NEGOCIACAO
+  rowsTotal    Int           @default(0)
+  rowsImported Int           @default(0)
+  rowsSkipped  Int           @default(0) // duplicadas
+  rowsFailed   Int           @default(0)
+  errorLog     String? // JSON com erros por linha
+  createdAt    DateTime      @default(now())
+  transactions Transaction[]
+  proventos    Provento[]
+}
+
+// ---------------------------------------------------------------------------
+// MERCADO: COTAÇÕES E BENCHMARKS
+// ---------------------------------------------------------------------------
+
+model PriceQuote {
+  id        String   @id @default(cuid())
+  assetId   String
+  asset     Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  date      DateTime
+  close     Float
+  source    String   @default("MANUAL") // MANUAL | B3_POSICAO | PROVIDER:<nome>
+  createdAt DateTime @default(now())
+
+  @@unique([assetId, date])
+  @@index([date])
+}
+
+model Benchmark {
+  id         String           @id @default(cuid())
+  code       String           @unique // CDI | IPCA | IBOV | SELIC
+  name       String
+  sgsCode    Int? // CDI=12 (diário, % a.d.) | IPCA=433 (mensal, %) | SELIC=11 | IBOV: null (fonte externa)
+  valueKind  String // DAILY_RATE | MONTHLY_RATE | INDEX_LEVEL
+  lastSyncAt DateTime?
+  values     BenchmarkValue[]
+}
+
+model BenchmarkValue {
+  id          String    @id @default(cuid())
+  benchmarkId String
+  benchmark   Benchmark @relation(fields: [benchmarkId], references: [id], onDelete: Cascade)
+  date        DateTime // CDI/IBOV: dia; IPCA: 1º dia do mês de referência
+  value       Float // taxa em % (CDI diário, IPCA mensal) ou nível do índice (IBOV)
+
+  @@unique([benchmarkId, date])
+  @@index([date])
+}
+
+// ---------------------------------------------------------------------------
+// CACHE DE CÁLCULO (derivado: pode ser apagado e recalculado a qualquer momento)
+// ---------------------------------------------------------------------------
+
+// Cota diária da carteira (TWR). Ver docs/ARQUITETURA.md, seção 4.
+model PortfolioSnapshot {
+  id           String   @id @default(cuid())
+  date         DateTime @unique
+  marketValue  Float // valor de mercado das posições no fechamento
+  provCash     Float    @default(0) // proventos líquidos acumulados mantidos na carteira
+  totalValue   Float // V_t = marketValue + provCash
+  netFlow      Float    @default(0) // F_t = compras (+) menos vendas (−) do dia
+  investedCost Float // custo (PM × qtd) das posições abertas
+  dailyReturn  Float    @default(0) // r_t
+  quota        Float // cota acumulada, base 100 na primeira data
+  createdAt    DateTime @default(now())
+}
+
+// Posição por ativo por dia (derivada do livro de transações)
+model PositionSnapshot {
+  id           String   @id @default(cuid())
+  assetId      String
+  asset        Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  date         DateTime
+  quantity     Float
+  averagePrice Float // preço médio ajustado
+  price        Float // cotação usada na data
+  marketValue  Float
+
+  @@unique([assetId, date])
+  @@index([date])
+}
