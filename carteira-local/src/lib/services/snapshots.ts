@@ -10,7 +10,7 @@ const chunk = <T,>(arr: T[], size: number): T[][] => {
   return out;
 };
 
-async function loadBenchmark(code: string) {
+export async function loadBenchmark(code: string) {
   const b = await prisma.benchmark.findUnique({ where: { code } });
   if (!b) return [];
   const rows = await prisma.benchmarkValue.findMany({ where: { benchmarkId: b.id }, orderBy: { date: "asc" } });
@@ -36,7 +36,7 @@ export async function loadEngineInput(endDate = toDayKey(new Date())): Promise<E
     })),
     transactions: txs.map((t) => ({
       assetId: t.assetId, type: t.type as TransactionType, date: toDayKey(t.tradeDate),
-      quantity: t.quantity, unitPrice: t.unitPrice, fees: t.fees, taxes: t.taxes, factor: t.factor,
+      quantity: t.quantity, unitPrice: t.unitPrice, fees: t.fees, taxes: t.taxes, factor: t.factor, counterpartAssetId: t.counterpartAssetId,
     })),
     proventos: provs.map((p) => ({ assetId: p.assetId, paymentDate: toDayKey(p.paymentDate), netAmount: p.netAmount })),
     quotes: q,

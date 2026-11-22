@@ -11,11 +11,12 @@
     "db:migrate": "prisma migrate dev",
     "db:studio": "prisma studio",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test src/lib/finance/__tests__/engine.test.ts",
+    "test": "node --experimental-strip-types --test src/lib/finance/__tests__/engine.test.ts src/lib/finance/__tests__/corporate.test.ts src/lib/finance/__tests__/cost-reduction.test.ts src/lib/import/__tests__/b3.test.ts src/lib/import/__tests__/b3-events.test.ts src/lib/import/__tests__/redemption.test.ts src/lib/import/__tests__/explain.test.ts src/lib/import/__tests__/real-cases.test.ts src/lib/reconcile/__tests__/custody.test.ts src/lib/benchmarks/__tests__/series-merge.test.ts src/lib/quotes/__tests__/quotes.test.ts",
     "db:seed": "prisma db seed",
     "sync:benchmarks": "tsx scripts/sync-benchmarks.ts",
     "sync:quotes": "tsx scripts/sync-quotes.ts",
-    "rebuild:snapshots": "tsx scripts/rebuild-snapshots.ts"
+    "rebuild:snapshots": "tsx scripts/rebuild-snapshots.ts",
+    "explain:b3": "tsx scripts/explain-b3.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.0.0",
@@ -27,8 +28,7 @@
     "react-dom": "^19.0.0",
     "recharts": "^2.13.0",
     "xlsx": "^0.18.5",
-    "zod": "^3.23.0",
-    "yahoo-finance2": "^2.13.2"
+    "zod": "^3.23.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

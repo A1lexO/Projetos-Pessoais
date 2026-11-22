@@ -1,5 +1,7 @@
 import { prisma } from "../db/prisma";
+import { fetchJson } from "../http";
 import { addDays, fromDayKey, toDayKey } from "../finance/dates";
+import { planSeriesReplace } from "./series-merge";
 
 // API SGS do Banco Central. Séries diárias aceitam janelas de no máximo 10 anos por chamada.
 export const SGS_BENCHMARKS = {
@@ -15,19 +17,6 @@ const CHUNK_YEARS = 9;
 const fmtBR = (k: string) => `${k.slice(8, 10)}/${k.slice(5, 7)}/${k.slice(0, 4)}`;
 const parseBR = (s: string) => `${s.slice(6, 10)}-${s.slice(3, 5)}-${s.slice(0, 2)}`;
 
-async function getJson(url: string, retries = 2): Promise<unknown> {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      const res = await fetch(url, { headers: { Accept: "application/json" } });
-      if (!res.ok) throw new Error(`SGS HTTP ${res.status}`);
-      return await res.json();
-    } catch (err) {
-      if (attempt >= retries) throw err;
-      await new Promise((r) => setTimeout(r, 800 * (attempt + 1)));
-    }
-  }
-}
-
 export async function fetchSgsSeries(sgsCode: number, from: string, to: string): Promise<{ date: string; value: number }[]> {
   const out: { date: string; value: number }[] = [];
   let start = from;
@@ -35,7 +24,7 @@ export async function fetchSgsSeries(sgsCode: number, from: string, to: string):
     const y = Number(start.slice(0, 4)) + CHUNK_YEARS;
     const chunkEnd = `${y}${start.slice(4)}` < to ? addDays(`${y}${start.slice(4)}`, -1) : to;
     const url = `https://api.bcb.gov.br/dados/serie/bcdata.sgs.${sgsCode}/dados?formato=json&dataInicial=${fmtBR(start)}&dataFinal=${fmtBR(chunkEnd)}`;
-    const rows = (await getJson(url)) as { data: string; valor: string }[];
+    const rows = await fetchJson<{ data: string; valor: string }[]>(url, { headers: { Accept: "application/json" } });
     for (const r of rows) {
       const v = Number(r.valor);
       if (Number.isFinite(v)) out.push({ date: parseBR(r.data), value: v });
@@ -64,10 +53,11 @@ export async function syncSgsBenchmark(key: SgsKey, opts: { since?: string; full
   }
   const to = toDayKey(new Date());
   const points = await fetchSgsSeries(def.sgsCode, from, to);
+  const plan = planSeriesReplace(from, points, def.valueKind === "MONTHLY_RATE");
   await prisma.$transaction([
-    prisma.benchmarkValue.deleteMany({ where: { benchmarkId: bench.id, date: { gte: fromDayKey(from) } } }),
-    prisma.benchmarkValue.createMany({ data: points.map((p) => ({ benchmarkId: bench.id, date: fromDayKey(p.date), value: p.value })) }),
+    prisma.benchmarkValue.deleteMany({ where: { benchmarkId: bench.id, date: { gte: fromDayKey(plan.deleteFrom) } } }),
+    prisma.benchmarkValue.createMany({ data: plan.rows.map((p) => ({ benchmarkId: bench.id, date: fromDayKey(p.date), value: p.value })) }),
     prisma.benchmark.update({ where: { id: bench.id }, data: { lastSyncAt: new Date() } }),
   ]);
-  return { key, from, to, fetched: points.length };
+  return { key, from, to, fetched: plan.rows.length };
 }

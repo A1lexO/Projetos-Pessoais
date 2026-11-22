@@ -24,6 +24,8 @@ export interface EngineTransaction {
   fees: number;
   taxes: number;
   factor?: number | null;
+  /** TRANSFER_OUT: ativo que recebe a posição (qtd × factor, mesmo custo total) */
+  counterpartAssetId?: string | null;
 }
 
 export interface EngineProvento {
@@ -43,7 +45,7 @@ export interface EngineInput {
   quotes: Record<string, QuotePoint[]>;
   benchmarks: { cdi?: BenchmarkPoint[]; selic?: BenchmarkPoint[]; ipca?: BenchmarkPoint[] };
   endDate: DayKey;
-  /** padrão true: reescreve o histórico do livro na base do último desdobramento */
+  /** padrão true: cotações vêm ajustadas por desdobramentos; o motor as devolve à base negociada na data (× fatores futuros do livro) */
   splitAdjustedQuotes?: boolean;
 }
 

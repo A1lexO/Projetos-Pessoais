@@ -2,7 +2,7 @@ export * from "./constants.ts";
 export * from "./dates.ts";
 export * from "./types.ts";
 export * from "./average-price.ts";
-export * from "./splits.ts";
+export * from "./corporate.ts";
 export * from "./fixed-income.ts";
 export * from "./positions.ts";
 export * from "./twr.ts";

@@ -78,3 +78,15 @@ export function lastIndexOnOrBefore(calendar: DayKey[], key: DayKey): number {
   }
   return lo - 1;
 }
+
+/**
+ * Dia do calendário em que um evento datado em `key` passa a valer:
+ * - dia útil ou fim de semana/feriado dentro do período: próximo dia útil;
+ * - depois do último dia útil, mas até `endKey` (ex.: hoje é sábado): o ÚLTIMO dia do calendário;
+ * - depois de `endKey` (data futura): -1 (ignorado).
+ */
+export function effectiveIndex(calendar: DayKey[], key: DayKey, endKey: DayKey): number {
+  const i = nextIndexOnOrAfter(calendar, key);
+  if (i >= 0) return i;
+  return calendar.length && key <= endKey ? calendar.length - 1 : -1;
+}

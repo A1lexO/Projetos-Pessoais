@@ -30,7 +30,9 @@ model Asset {
   updatedAt  DateTime @updatedAt
 
   fixedIncome  FixedIncomeTerms?
-  transactions Transaction[]
+  transactions Transaction[] @relation("AssetTransactions")
+  /** trocas de ticker / conversões de recibo cujo DESTINO é este ativo */
+  transfersIn  Transaction[] @relation("TransferCounterpart")
   proventos    Provento[]
   quotes       PriceQuote[]
   positions    PositionSnapshot[]
@@ -59,14 +61,18 @@ model FixedIncomeTerms {
 model Transaction {
   id            String       @id @default(cuid())
   assetId       String
-  asset         Asset        @relation(fields: [assetId], references: [id], onDelete: Cascade)
-  type          String // BUY | SELL | SPLIT | REVERSE_SPLIT | BONUS | MATURITY | AMORTIZATION
+  asset         Asset        @relation("AssetTransactions", fields: [assetId], references: [id], onDelete: Cascade)
+  // BUY | SELL | SPLIT | REVERSE_SPLIT | BONUS | MATURITY | AMORTIZATION | TRANSFER_OUT | FRACTION_WRITEOFF
+  type          String
   tradeDate     DateTime
-  quantity      Float // em SPLIT/BONUS: quantidade adicional (ou use `factor`)
+  quantity      Float // em SPLIT/BONUS: quantidade adicional; TRANSFER_OUT: qtd transferida (0 = toda a posição)
   unitPrice     Float // BRL; 0 em eventos corporativos sem custo
   fees          Float        @default(0) // corretagem + emolumentos
   taxes         Float        @default(0) // IR retido na fonte etc.
-  factor        Float? // desdobramento 2:1 => 2 ; grupamento 10:1 => 0.1
+  factor        Float? // desdobramento 2:1 => 2 ; grupamento 10:1 => 0.1 ; TRANSFER_OUT: razão (qtd destino ÷ qtd origem)
+  // TRANSFER_OUT (troca de ticker, incorporação, conversão de recibo): ativo que recebe posição e custo
+  counterpartAssetId String?
+  counterpart        Asset?  @relation("TransferCounterpart", fields: [counterpartAssetId], references: [id], onDelete: SetNull)
   source        String       @default("MANUAL") // MANUAL | B3_MOVIMENTACAO | B3_NEGOCIACAO
   externalId    String? // hash determinístico da linha importada (deduplicação)
   importBatchId String?

@@ -146,7 +146,7 @@ Exemplo: "IPCA + 6,2%". Janelas menores que ~3 meses anualizam com ruído; a tel
 ### 4.8 Pontos de atenção
 
 1. **Dias sem cotação**: carrega-se a última cotação conhecida (forward fill). Ativo sem nenhuma cotação usa o preço médio e é sinalizado.
-2. **Eventos corporativos**: desdobramentos, grupamentos e bonificações ajustam quantidade e preço médio, nunca geram fluxo.
+2. **Eventos corporativos**: desdobramentos, grupamentos, bonificações, trocas de ticker e conversões de recibo ajustam quantidade e preço médio, nunca geram fluxo (ver seção 13).
 3. **Renda fixa**: marcada na curva (valor aplicado acrescido da taxa contratada e do indexador: % do CDI, IPCA + spread ou prefixado), usando as séries em cache. Marcação a mercado do Tesouro pode vir depois.
 4. **Reprodutibilidade**: o motor é determinístico. `PortfolioSnapshot` é apenas cache; recalcular a partir do livro de transações deve dar o mesmo resultado.
 
@@ -181,7 +181,7 @@ Fluxo: upload → detecção do tipo de arquivo pelo cabeçalho → parser espec
 
 - **Etapa 1**: estrutura base, schema, documentação. ✅
 - **Etapa 2**: motor de cálculo, sync de benchmarks e cotações, seed. ✅ (ver seção 10)
-- **Etapa 3**: importador B3 (config de colunas isolada) e telas (Dashboard, Meus Ativos, Lançamentos).
+- **Etapa 3**: importador B3 e telas (Dashboard, Meus Ativos, Lançamentos). ✅ (ver seção 11)
 
 ## 10. Etapa 2 — o que foi implementado
 
@@ -215,7 +215,7 @@ Lançamentos/Proventos┘                       └─> PortfolioSnapshot (cota 
 - **CDI/Selic**: taxa diária da série; dia sem dado (ex.: hoje) repete o último valor conhecido.
 - **IPCA**: variação mensal distribuída por igual pelos dias úteis do mês. Mês ainda não divulgado é projetado com o último valor conhecido.
 - **Cotações**: último fechamento até o dia (forward fill). Sem nenhuma cotação, usa o preço médio (`priceSource = COST`).
-- **Desdobramentos**: o Yahoo ajusta o histórico retroativamente; por isso o motor reescreve compras/vendas anteriores ao evento (qtd × k, preço ÷ k). Bonificações **não** são ajustadas.
+- **Desdobramentos**: o livro fica em termos reais (como negociado). O Yahoo ajusta o histórico retroativamente; por isso, ao valorizar um dia, o motor devolve a cotação à base negociada multiplicando pelos fatores dos desdobramentos/grupamentos posteriores do livro. Bonificações **não** geram ajuste de cotação.
 - **Proventos**: líquidos, acumulados como caixa dentro da carteira (entram no retorno, não são fluxo externo).
 - **Dividendos não reinvestidos**: o caixa de proventos não rende CDI. Simplificação deliberada.
 
@@ -236,7 +236,139 @@ O seed grava benchmarks e cotações **sintéticos**. Antes de usar dados reais:
 
 ### 10.5 Limitações conhecidas
 
-- BRAPI não foi implementada; o Yahoo está atrás de `lib/quotes/yahoo.ts` e pode ser trocado.
-- `yahoo-finance2` é API não oficial: pode quebrar ou limitar requisições.
+- Cotações: ver seção 12 (provedores com fallback).
 - Sem marcação a mercado do Tesouro e sem IR/IOF na renda fixa.
 - Eventos corporativos além de desdobramento/grupamento (bonificação, subscrição, incorporação) exigem lançamento manual.
+
+## 11. Etapa 3 — importador B3 e telas
+
+### 11.1 Importador (`src/lib/import`, config em `src/config/b3-columns.ts`)
+
+Fluxo: upload → `readTable` (xlsx/csv) → `detectKind` pelos cabeçalhos → `parseB3Rows` → **prévia** (consulta o banco, nada é gravado) → confirmação → gravação em um `ImportBatch`.
+
+- **Mapeamento isolado**: nomes de colunas, tipos de movimentação e opções ficam só em `b3-columns.ts`. Aliases são comparados sem acento e sem diferença de caixa.
+- **Deduplicação**: `externalId = sha1(origem, data, tipo, ativo, qtd, preço, instituição, n)`, em que `n` é a ocorrência da linha idêntica dentro do arquivo. Reimportar o mesmo arquivo gera os mesmos hashes e as linhas são ignoradas. Duas execuções idênticas legítimas no mesmo dia continuam distintas.
+- **Negociação x Movimentação**: compras/vendas aparecem nas duas planilhas. Por padrão, a Movimentação só traz proventos e desdobramentos/bonificações; negócios vêm da Negociação. Se você só tem a Movimentação, ligue `importTradesFromMovimentacao`.
+- **Ignorado com motivo**: opções/termo/futuro, renda fixa (cadastro manual), grupamento, leilão de fração, transferência de custódia.
+- **Alertas**: classe presumida (ticker `11` sem texto de produto), primeira operação de um ativo novo ser venda.
+- **Desfazer**: cada lote pode ser removido inteiro (operações e proventos dele); ativos criados permanecem.
+- **Proventos da B3**: o valor da planilha é tratado como líquido (bruto = líquido, IR = 0).
+
+### 11.2 Telas (App Router, Server Components + gráficos Recharts em Client Components)
+
+| Rota | Conteúdo |
+|---|---|
+| `/` | KPIs, evolução da cota vs. CDI/IPCA/Ibovespa (`?janela=1M|6M|YTD|12M|ALL`), alocação por classe |
+| `/ativos` | tabela por classe (`?classe=FII`): qtd, PM, cotação, saldo, resultado, rentabilidade, YoC 12M, peso |
+| `/lancamentos` | sync, importação com prévia, formulário manual, histórico paginado (`?aba=&q=&pagina=`), lotes |
+
+Definições dos KPIs: **Patrimônio** = posições + proventos recebidos; **Valor aplicado** = aportes líquidos de resgates (Σ fluxos); **Lucro** = Patrimônio − Valor aplicado (inclui realizado, não realizado e proventos); **Rentabilidade** = variação da cota na janela. Janela maior que o histórico mostra desde o início.
+
+### 11.3 API (Route Handlers)
+
+`POST /api/import/preview` · `POST /api/import/commit` · `DELETE /api/import/batches/:id` · `POST /api/transactions` · `DELETE /api/transactions/:id` · `POST /api/proventos` · `DELETE /api/proventos/:id` · `POST /api/sync` (`steps`: benchmarks, quotes, snapshots). Toda mutação recalcula os snapshots.
+
+### 11.4 Limitações da Etapa 3
+
+- Lançamentos podem ser criados e excluídos; **edição in-place ainda não existe** (exclua e relance).
+- Resgate de renda fixa só total pela tela.
+- Importação da planilha de **Posição** da B3 não foi implementada.
+- Os layouts da B3 são presumidos; valide com um arquivo real e ajuste `b3-columns.ts`.
+
+## 12. Etapa 3.1 — camada de cotações resiliente
+
+Motivo: o Yahoo passou a responder `429 Too Many Requests` em **texto puro**, o que quebrava o parser JSON.
+
+| Peça | Arquivo | Função |
+|---|---|---|
+| Cliente HTTP | `lib/http.ts` | lê o corpo como texto; detecta rate limit (status 429 **ou** corpo "Too Many Requests", mesmo com HTTP 200); respeita `Retry-After`; backoff exponencial com jitter; 4xx e JSON inválido não repetem |
+| Throttle | `lib/quotes/throttle.ts` | intervalo mínimo entre chamadas (`QUOTE_DELAY_MS`, padrão 450 ms) |
+| Yahoo | `lib/quotes/yahoo.ts` | fetch direto em `query1.finance.yahoo.com/v8/finance/chart`, com User-Agent de navegador; sem a lib `yahoo-finance2` |
+| BRAPI | `lib/quotes/brapi.ts` | fallback opcional, ativo só com `BRAPI_TOKEN` |
+| Cadeia | `lib/quotes/chain.ts` | tenta Yahoo → BRAPI; após 3 rate limits seguidos o provedor é pausado até o fim da execução (circuit breaker) |
+| Sync | `lib/quotes/sync.ts` | 1 ticker por vez; pula tickers já atualizados até o último pregão; falha de um ticker não derruba os outros |
+| Benchmarks | `lib/services/sync-benchmarks.ts` | CDI, Selic, IPCA e Ibovespa isolados: falha do Ibovespa **não** impede salvar SGS |
+
+Configuração (`.env`): `BRAPI_TOKEN=` (opcional) e `QUOTE_DELAY_MS=450`.
+
+Se o IP já está bloqueado, espere alguns minutos: o sync é incremental e retoma de onde parou.
+
+## 13. Etapa 4 — eventos corporativos genéricos
+
+### 13.1 Tipos de lançamento
+
+| Tipo | Efeito no motor |
+|---|---|
+| `TRANSFER_OUT` | **Troca de ticker, incorporação, conversão de recibo.** Tira `quantity` (0 = tudo) do ativo de origem ao PM vigente e entrega ao `counterpartAssetId` com quantidade × `factor` (razão) e o **mesmo custo total**. Sem fluxo, sem resultado realizado. |
+| `FRACTION_WRITEOFF` | **Baixa de fração residual.** Reduz a quantidade ao PM (que não muda). O valor recebido (`quantidade × unitPrice`, pode ser 0) é saída de caixa, como numa venda. |
+| `SPLIT` / `REVERSE_SPLIT` | Fator explícito (`factor`) ou derivado da quantidade creditada/debitada. |
+
+O ativo de origem de uma troca total passa a `isActive = false` e **não é mais consultado** nos syncs de cotação. O destino é criado se não existir. Cadeias (A→B→C) são resolvidas por ordem topológica; ciclos geram aviso.
+
+### 13.2 Desdobramentos sem reescrever o histórico
+
+O livro guarda quantidades e preços reais. O motor guarda, por ativo, o fator de cada desdobramento/grupamento e, ao valorizar o dia `t`, calcula `preço_negociado(t) = cotação_ajustada(t) × Π fatores dos eventos posteriores a t`. Isso funciona também quando a posição chegou por troca de ticker (a quantidade transferida sofre os desdobramentos seguintes do destino).
+
+### 13.3 Parser da Movimentação (`src/config/b3-columns.ts`)
+
+| Texto na B3 (contém) | Interpretação |
+|---|---|
+| incorporação / fusão / conversão / substituição / troca de ticker | débito em X + crédito em Y no mesmo dia e tipo ⇒ `TRANSFER_OUT` (razão = crédito ÷ débito). Ambíguo ou sem contrapartida ⇒ aviso, lançar manualmente |
+| recibo de subscrição | crédito isolado ⇒ compra do recibo ao preço da linha; débito + crédito ⇒ conversão |
+| desdobramento | só crédito ⇒ `SPLIT` (id idêntico ao anterior); débito + crédito ⇒ fator = créditos ÷ débitos |
+| grupamento | débito + crédito ⇒ `REVERSE_SPLIT` com fator; só uma ponta ⇒ **não aplicado** |
+| atualização | só se débito e crédito diferirem; senão não aplicado |
+| leilão de fração | débito ⇒ `FRACTION_WRITEOFF` com o valor recebido |
+| fração em ativos | crédito ⇒ `BONUS` de custo zero |
+
+Tudo que o parser interpreta como evento aparece como **alerta** na prévia da importação; o que ele não entende aparece em "Linhas ignoradas" com o texto original da B3. Os nomes dos eventos foram escritos de memória: ajuste `MOVIMENTACAO_RULES` conforme sua planilha.
+
+### 13.4 Conferência (`/conferencia`)
+
+- **Comparar com a custódia**: cole `TICKER QUANTIDADE` da corretora; o sistema aponta fração, recibo, troca de ticker (diferença igual à posição de um ativo órfão), saldo ausente ou divergência sem causa óbvia. Recibo só é associado a ativo de mesmo prefixo.
+- **Frações residuais**, **recibos 12/13/14 com saldo** e **posições sem cotação recente** com ação em um clique.
+
+### 13.5 Limitações
+
+- Valorização anterior à troca: tickers deslistados não têm cotação no Yahoo, então a posição do ticker antigo é valorizada **a custo** até a data do evento e passa a mercado no dia da troca. Isso concentra o resultado não realizado num único dia da cota (TWR). Cotações manuais/CSV para tickers antigos ficam como evolução.
+- Divergências sem evento identificável (ex.: histórico anterior à janela exportada) não são corrigidas automaticamente: a Conferência só indica; um ajuste manual de saldo é um aporte e afeta o TWR.
+- Bonificação, subscrição e incorporação com troca de razão exigem conferir a razão informada.
+
+## 14. Etapa 5 — redução de custo, edição e diagnóstico
+
+### 14.1 `COST_REDUCTION` (resgate/amortização em incorporação)
+
+Caso: incorporação em que o acionista recebe ações resgatáveis que logo são pagas em dinheiro (Petz/Cobasi: `C9BS4`, R$ 568,84). O valor recebido **entra no caixa** e **abate o custo total** do ativo que recebeu a incorporação; a quantidade não muda e o preço médio cai.
+
+- Motor: `custo' = custo − (quantidade × unitPrice − custos)`. Se exceder o custo, o custo zera e o excedente é resultado realizado. Sem posição no ativo, só avisa e o dinheiro entra no caixa.
+- TWR: o valor é **caixa retido na carteira** (como proventos), nunca aporte/resgate.
+- Parser (`Resgate`, crédito): o ativo de destino é um dos outros tickers creditados no grupo de "Incorporação" que creditou o ticker resgatado. O importador escolhe o candidato que já existe (no banco ou no lote). Sem candidato conhecido ou sem incorporação na planilha, **não aplica** e avisa; use a aba "Redução de custo".
+
+### 14.2 Edição de lançamentos
+
+O ícone de lápis no histórico edita data, quantidade, preço, custos e fator/razão e recalcula os snapshots (operações; proventos continuam excluir-e-relançar). Linhas importadas editadas não são duplicadas numa reimportação (o `externalId` é mantido).
+
+### 14.3 Tickers com dígito
+
+`TICKER_RE = /^[A-Z][A-Z0-9]{2}[A-Z]\d{1,2}$/`: aceita `B3SA3`, `C9BS4`, `A1MD34` e continua rejeitando códigos de renda fixa (`CDB123`).
+
+### 14.4 Diagnóstico de divergências
+
+- `/extrato/TICKER`: dias em que a quantidade ou o PM mudaram, com os lançamentos (inclui entrada/saída por troca).
+- `npm run explain:b3 -- arquivo.xlsx TICKER...`: para cada linha da planilha desses tickers mostra como o importador a trata e resume créditos/débitos por tipo. Tipos sem regra aparecem como `SEM REGRA`.
+
+## 15. Etapa 6 — Desdobro, grupamento por crédito, frações e restituição de capital
+
+| Texto na B3 | Interpretação |
+|---|---|
+| **Desdobro** (crédito) | `SPLIT` por quantidade: soma à posição **mantendo o custo total** (PM cai). Se a razão derivada for um desdobramento plausível (p.ex. ×2, ×10), as cotações do provedor são "des-ajustadas"; crédito avulso (p.ex. 414→450, razão 25/23) **não** mexe nas cotações. |
+| **Grupamento** (só crédito) | `REGROUP`: o crédito é a **posição final** (256 → 2,56; fator = 2,56 ÷ posição anterior). Com débito + crédito: `REVERSE_SPLIT` com fator explícito. Crédito ≥ posição: ignorado com aviso. |
+| **Fração em Ativos** (débito) + **Leilão de Fração** (crédito em dinheiro) | pareados por ativo e quantidade num único `FRACTION_WRITEOFF` na data do débito, com o valor do leilão. Sem o leilão: baixa a R$ 0 (aviso). Leilão sem débito: baixa na data do leilão (aviso). |
+| **Fração em Ativos** (crédito) | `BONUS` de custo zero. |
+| **Restituição de Capital** (crédito) | `COST_REDUCTION` no próprio ativo; a "Quantidade" da B3 é informativa e **não** entra na posição. |
+
+Ordem no mesmo dia (por ativo): grupamento → baixa de fração → desdobramento/bonificação → compras → vendas/redução de custo → troca de ticker. Isso reproduz o caso CASH3 de 02/06/2023 (256 → 2,56 → 2 → 20) independentemente da ordem em que a B3 lista as linhas.
+
+### Diagnóstico
+
+`npm run explain:b3 -- Movimentacao.xlsx Negociacao.xlsx TICKER...` mostra o resumo por tipo, o tratamento de cada linha, os **eventos que seriam lançados** e a **posição simulada** (quantidade, PM e custo, passo a passo) para conferir com a custódia antes de importar.

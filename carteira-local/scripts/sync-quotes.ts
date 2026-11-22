@@ -4,5 +4,8 @@ import { syncQuotes } from "../src/lib/quotes/sync";
 const full = process.argv.includes("--full");
 const tickers = process.argv.slice(2).filter((a) => !a.startsWith("--"));
 syncQuotes({ full, tickers: tickers.length ? tickers : undefined })
-  .then((r) => console.table(r))
+  .then((r) => {
+    console.table(r);
+    process.exitCode = r.some((x) => x.status === "error") ? 1 : 0;
+  })
   .catch((e) => { console.error(e); process.exit(1); });

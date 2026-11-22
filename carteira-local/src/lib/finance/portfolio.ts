@@ -1,8 +1,7 @@
-import { buildCalendar, nextIndexOnOrAfter } from "./dates.ts";
+import { buildCalendar, effectiveIndex } from "./dates.ts";
 import type { DayKey } from "./dates.ts";
 import { buildRateArrays, cumulativeIndex } from "./fixed-income.ts";
 import { computePositions } from "./positions.ts";
-import { normalizeSplits } from "./splits.ts";
 import { computeQuotaSeries } from "./twr.ts";
 import type { EngineInput, PortfolioRow, PortfolioPoint, PositionPoint } from "./types.ts";
 
@@ -29,18 +28,20 @@ export function computePortfolio(input: EngineInput): PortfolioResult {
   if (!calendar.length) return empty;
 
   const rates = buildRateArrays(calendar, input.benchmarks);
-  const transactions = input.splitAdjustedQuotes === false ? input.transactions : normalizeSplits(input.transactions);
-  const pos = computePositions({ ...input, transactions }, calendar, rates);
+  const pos = computePositions(input, calendar, rates);
 
   const cashDelta = new Float64Array(calendar.length);
+  let futureProv = 0;
   for (const p of input.proventos) {
-    const i = nextIndexOnOrAfter(calendar, p.paymentDate);
+    const i = effectiveIndex(calendar, p.paymentDate, input.endDate);
     if (i >= 0) cashDelta[i] += p.netAmount;
+    else futureProv++;
   }
+  if (futureProv) pos.warnings.push(`${futureProv} provento(s) com data posterior a ${input.endDate} foram ignorados no cálculo`);
   const rows: PortfolioRow[] = [];
   let cash = 0;
   for (let i = 0; i < calendar.length; i++) {
-    cash += cashDelta[i];
+    cash += cashDelta[i] + pos.cashIn[i];
     rows.push({
       date: calendar[i],
       marketValue: pos.marketValue[i],
